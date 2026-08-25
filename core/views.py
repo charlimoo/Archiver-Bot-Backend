@@ -9,6 +9,7 @@ from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action, api_view, authentication_classes, permission_classes
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework.response import Response
 
@@ -140,8 +141,15 @@ class OwnedViewSet(viewsets.ModelViewSet):
         return self.request.user.telegram_user
 
 
+class ChatPagination(PageNumberPagination):
+    page_size = 100
+    page_size_query_param = "page_size"
+    max_page_size = 500
+
+
 class ChatViewSet(OwnedViewSet):
     serializer_class = ChatSerializer
+    pagination_class = ChatPagination
 
     def get_queryset(self):
         queryset = Chat.objects.filter(owner=self.owner).prefetch_related("topics")
@@ -632,6 +640,7 @@ def service_upsert_chat(request):
             "type": request.data.get("type", Chat.Type.GROUP),
             "title": request.data.get("title", ""),
             "username": request.data.get("username", ""),
+            "is_bot": bool(request.data.get("is_bot", False)),
             "is_forum": bool(request.data.get("is_forum", False)),
             "bot_is_admin": bool(request.data.get("bot_is_admin", False)),
         },

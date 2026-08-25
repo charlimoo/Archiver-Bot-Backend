@@ -169,6 +169,7 @@ async def _sync_chats(job: Job) -> None:
                     "type": chat_type,
                     "title": dialog.name or "",
                     "username": getattr(entity, "username", "") or "",
+                    "is_bot": bool(dialog.is_user and getattr(entity, "bot", False)),
                     "is_forum": bool(getattr(entity, "forum", False)),
                 },
             )
@@ -236,6 +237,7 @@ async def _setup_archive(job: Job) -> None:
             defaults={
                 "type": Chat.Type.SUPERGROUP,
                 "title": settings.BOT_NAME,
+                "is_bot": False,
                 "is_forum": True,
                 "is_archive": True,
                 "bot_is_admin": False,

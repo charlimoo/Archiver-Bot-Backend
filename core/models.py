@@ -60,6 +60,7 @@ class Chat(TimeStampedModel):
     type = models.CharField(max_length=16, choices=Type.choices)
     title = models.CharField(max_length=255, blank=True)
     username = models.CharField(max_length=64, blank=True)
+    is_bot = models.BooleanField(default=False)
     is_forum = models.BooleanField(default=False)
     is_archive = models.BooleanField(default=False)
     bot_is_admin = models.BooleanField(default=False)

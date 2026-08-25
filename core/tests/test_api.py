@@ -31,6 +31,33 @@ def test_user_cannot_see_another_users_chats():
 
 
 @pytest.mark.django_db
+def test_chat_list_supports_large_pages_and_bot_classification():
+    owner = TelegramUser.objects.create(telegram_id=12)
+    Chat.objects.bulk_create(
+        [
+            Chat(
+                owner=owner,
+                telegram_id=index,
+                type=Chat.Type.PRIVATE,
+                title=f"Chat {index}",
+                is_bot=index == 100,
+            )
+            for index in range(101)
+        ]
+    )
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_user_token(owner.pk)}")
+
+    response = client.get("/api/chats/?page_size=500")
+
+    assert response.status_code == 200
+    assert len(response.data["results"]) == 101
+    assert next(item for item in response.data["results"] if item["telegram_id"] == 100)[
+        "is_bot"
+    ] is True
+
+
+@pytest.mark.django_db
 @override_settings(SERVICE_AUTH_SECRET="service-secret")
 def test_service_endpoint_rejects_wrong_token():
     client = APIClient()

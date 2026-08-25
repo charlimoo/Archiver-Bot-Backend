@@ -83,6 +83,7 @@ class ChatSerializer(serializers.ModelSerializer):
             "type",
             "title",
             "username",
+            "is_bot",
             "is_forum",
             "is_archive",
             "bot_is_admin",

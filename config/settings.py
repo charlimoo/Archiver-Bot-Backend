@@ -104,4 +104,5 @@ TELEGRAM_AUTH_MAX_AGE_SECONDS = int(os.getenv("TELEGRAM_AUTH_MAX_AGE_SECONDS", "
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 BOT_NAME = os.getenv("BOT_NAME", "ArchiverBot")
+BOT_USERNAME = os.getenv("BOT_USERNAME", "archiverdupbot").lstrip("@")
 ADMIN_ARCHIVE_CHAT_ID = int(os.getenv("ADMIN_ARCHIVE_CHAT_ID", "0"))

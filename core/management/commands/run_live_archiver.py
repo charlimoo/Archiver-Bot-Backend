@@ -14,7 +14,13 @@ from telethon.sessions import StringSession
 from core.models import ArchiveRule, Chat, ConnectedAccount, FileRecord, MessageMapping
 from core.security import decrypt_session
 from core.services import index_archived_message, register_file
-from core.tasks import _content_type, _create_topic, _destination_topic, forward_message
+from core.tasks import (
+    _content_type,
+    _create_topic,
+    _destination_topic,
+    forward_message,
+    resolve_input_entity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +99,13 @@ def _store_mapping(rule: ArchiveRule, source, destination):
 
 async def _send(client: TelegramClient, rule: ArchiveRule, message):
     destination_topic = await _destination_topic(client, rule)
+    source_entity = await resolve_input_entity(client, rule.source_chat.telegram_id)
+    destination_entity = await resolve_input_entity(client, rule.destination_chat.telegram_id)
     try:
         return await forward_message(
             client,
-            source_chat_id=rule.source_chat.telegram_id,
-            destination_chat_id=rule.destination_chat.telegram_id,
+            source_chat_id=source_entity,
+            destination_chat_id=destination_entity,
             destination_thread_id=(destination_topic.thread_id if destination_topic else None),
             message=message,
         )
@@ -105,7 +113,7 @@ async def _send(client: TelegramClient, rule: ArchiveRule, message):
         attribution = f"Originally sent by {message.sender_id or 'unknown'}\n\n"
         if not message.media:
             return await client.send_message(
-                rule.destination_chat.telegram_id,
+                destination_entity,
                 attribution + (message.message or ""),
                 reply_to=destination_topic.thread_id if destination_topic else None,
             )
@@ -114,7 +122,7 @@ async def _send(client: TelegramClient, rule: ArchiveRule, message):
             if not downloaded:
                 raise RuntimeError(f"Could not download message {message.id}") from None
             return await client.send_file(
-                rule.destination_chat.telegram_id,
+                destination_entity,
                 Path(downloaded),
                 caption=attribution + (message.message or ""),
                 reply_to=destination_topic.thread_id if destination_topic else None,

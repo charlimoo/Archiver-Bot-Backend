@@ -11,6 +11,7 @@ from telethon.errors import ChatForwardsRestrictedError, FloodWaitError
 from telethon.helpers import generate_random_long
 from telethon.sessions import StringSession
 from telethon.tl import functions
+from telethon.tl.types import ChatAdminRights
 from telethon.utils import get_peer_id
 
 from .models import (
@@ -56,6 +57,19 @@ def _file_metadata(message) -> tuple[str, int]:
     )
 
 
+async def resolve_input_entity(client: TelegramClient, telegram_id: int):
+    """Resolve a peer, refreshing Telethon's in-memory entity cache when needed."""
+    try:
+        return await client.get_input_entity(telegram_id)
+    except ValueError as original_error:
+        async for dialog in client.iter_dialogs():
+            if dialog.id == telegram_id:
+                return dialog.input_entity
+        raise RuntimeError(
+            f"Telegram chat {telegram_id} is no longer accessible. Sync chats and try again."
+        ) from original_error
+
+
 async def forward_message(
     client: TelegramClient,
     *,
@@ -64,17 +78,19 @@ async def forward_message(
     message,
     destination_thread_id: int | None = None,
 ):
+    source = await resolve_input_entity(client, source_chat_id)
+    destination = await resolve_input_entity(client, destination_chat_id)
     if not destination_thread_id:
         return await client.forward_messages(
-            destination_chat_id,
+            destination,
             message,
-            from_peer=source_chat_id,
+            from_peer=source,
         )
     result = await client(
         functions.messages.ForwardMessagesRequest(
-            from_peer=await client.get_input_entity(source_chat_id),
+            from_peer=source,
             id=[message.id],
-            to_peer=await client.get_input_entity(destination_chat_id),
+            to_peer=destination,
             random_id=[generate_random_long()],
             top_msg_id=destination_thread_id,
         )
@@ -92,7 +108,7 @@ async def _create_topic(client: TelegramClient, chat: Chat, name: str) -> Topic:
         return existing
     result = await client(
         functions.messages.CreateForumTopicRequest(
-            peer=chat.telegram_id,
+            peer=await resolve_input_entity(client, chat.telegram_id),
             title=name[:128],
             random_id=generate_random_long(),
         )
@@ -113,6 +129,36 @@ async def _create_topic(client: TelegramClient, chat: Chat, name: str) -> Topic:
         defaults={"name": name[:255]},
     )
     return topic
+
+
+async def _add_bot_as_admin(client: TelegramClient, channel) -> None:
+    if not settings.BOT_USERNAME:
+        raise RuntimeError("The Telegram bot username is not configured.")
+
+    bot = await client.get_input_entity(f"@{settings.BOT_USERNAME}")
+    await client(
+        functions.channels.InviteToChannelRequest(
+            channel=channel,
+            users=[bot],
+        )
+    )
+    await client(
+        functions.channels.EditAdminRequest(
+            channel=channel,
+            user_id=bot,
+            admin_rights=ChatAdminRights(
+                change_info=True,
+                delete_messages=True,
+                ban_users=True,
+                invite_users=True,
+                pin_messages=True,
+                manage_call=True,
+                other=True,
+                manage_topics=True,
+            ),
+            rank="Archiver",
+        )
+    )
 
 
 async def _destination_topic(client: TelegramClient, rule: ArchiveRule) -> Topic | None:
@@ -230,6 +276,7 @@ async def _setup_archive(job: Job) -> None:
                 tabs=True,
             )
         )
+        await _add_bot_as_admin(client, channel)
         telegram_id = get_peer_id(channel)
         chat, _ = await sync_to_async(Chat.objects.update_or_create)(
             owner=job.owner,
@@ -240,7 +287,7 @@ async def _setup_archive(job: Job) -> None:
                 "is_bot": False,
                 "is_forum": True,
                 "is_archive": True,
-                "bot_is_admin": False,
+                "bot_is_admin": True,
             },
         )
         await sync_to_async(TelegramUser.objects.filter(pk=job.owner_id).update)(
@@ -263,8 +310,9 @@ async def _sync_members(job: Job) -> None:
     )
     client = await _client_for(job)
     try:
+        entity = await resolve_input_entity(client, chat.telegram_id)
         participants = [
-            participant async for participant in client.iter_participants(chat.telegram_id)
+            participant async for participant in client.iter_participants(entity)
         ]
         job.total = len(participants)
         await sync_to_async(job.save)(update_fields=["total", "updated_at"])
@@ -293,8 +341,12 @@ async def _index_history(job: Job) -> None:
         limit_per_chat = int(job.payload.get("limit_per_chat", 0)) or None
         processed = 0
         for chat in chats:
+            try:
+                entity = await resolve_input_entity(client, chat.telegram_id)
+            except RuntimeError:
+                continue
             async for message in client.iter_messages(
-                chat.telegram_id,
+                entity,
                 reverse=True,
                 limit=limit_per_chat,
             ):
@@ -338,12 +390,16 @@ async def _import_history(job: Job) -> None:
     )(pk=job.payload["rule_id"], owner=job.owner)
     client = await _client_for(job)
     try:
+        source_entity = await resolve_input_entity(client, rule.source_chat.telegram_id)
+        destination_entity = await resolve_input_entity(
+            client, rule.destination_chat.telegram_id
+        )
         minimum = (rule.first_message_id - 1) if rule.first_message_id else 0
         maximum = (rule.last_message_id + 1) if rule.last_message_id else 0
         messages = [
             message
             async for message in client.iter_messages(
-                rule.source_chat.telegram_id,
+                source_entity,
                 min_id=minimum,
                 max_id=maximum,
                 reverse=True,
@@ -379,8 +435,8 @@ async def _import_history(job: Job) -> None:
             try:
                 sent = await forward_message(
                     client,
-                    source_chat_id=rule.source_chat.telegram_id,
-                    destination_chat_id=rule.destination_chat.telegram_id,
+                    source_chat_id=source_entity,
+                    destination_chat_id=destination_entity,
                     destination_thread_id=(
                         destination_topic.thread_id if destination_topic else None
                     ),
@@ -394,7 +450,7 @@ async def _import_history(job: Job) -> None:
                         if not downloaded:
                             raise RuntimeError(f"Could not download message {message.id}") from exc
                         sent = await client.send_file(
-                            rule.destination_chat.telegram_id,
+                            destination_entity,
                             Path(downloaded),
                             caption=prefix + (message.message or ""),
                             reply_to=(
@@ -403,7 +459,7 @@ async def _import_history(job: Job) -> None:
                         )
                 else:
                     sent = await client.send_message(
-                        rule.destination_chat.telegram_id,
+                        destination_entity,
                         prefix + (message.message or ""),
                         reply_to=(destination_topic.thread_id if destination_topic else None),
                     )
@@ -411,8 +467,8 @@ async def _import_history(job: Job) -> None:
                 await asyncio.sleep(exc.seconds)
                 sent = await forward_message(
                     client,
-                    source_chat_id=rule.source_chat.telegram_id,
-                    destination_chat_id=rule.destination_chat.telegram_id,
+                    source_chat_id=source_entity,
+                    destination_chat_id=destination_entity,
                     destination_thread_id=(
                         destination_topic.thread_id if destination_topic else None
                     ),
@@ -462,7 +518,7 @@ async def _import_history(job: Job) -> None:
                             message=message,
                         )
                         await client.delete_messages(
-                            rule.destination_chat.telegram_id,
+                            destination_entity,
                             [sent.id],
                         )
                         record.status = FileRecord.Status.MOVED

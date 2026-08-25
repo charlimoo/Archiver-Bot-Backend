@@ -1,0 +1,41 @@
+[project]
+name = "archiver-backend"
+version = "0.1.0"
+description = "Django API and job workers for ArchiverBot"
+requires-python = ">=3.13"
+dependencies = [
+  "celery[redis]>=5.6,<6",
+  "cryptography>=45,<47",
+  "dj-database-url>=3,<4",
+  "django>=5.2,<5.3",
+  "django-cors-headers>=4.7,<5",
+  "djangorestframework>=3.16,<4",
+  "drf-spectacular>=0.28,<1",
+  "gunicorn>=23,<24",
+  "psycopg[binary]>=3.2,<4",
+  "telethon>=1.44,<2",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<10",
+  "pytest-django>=4.11,<5",
+  "ruff>=0.12,<1",
+  "watchfiles>=1.1,<2",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+default = true

@@ -185,6 +185,19 @@ class JobSerializer(serializers.ModelSerializer):
         return value
 
 
+class AdminJobSerializer(JobSerializer):
+    owner_telegram_id = serializers.IntegerField(source="owner.telegram_id", read_only=True)
+    owner_display_name = serializers.CharField(source="owner.display_name", read_only=True)
+
+    class Meta(JobSerializer.Meta):
+        fields = [
+            *JobSerializer.Meta.fields,
+            "owner_telegram_id",
+            "owner_display_name",
+        ]
+        read_only_fields = fields
+
+
 class ArchivedMessageSerializer(serializers.ModelSerializer):
     chat_title = serializers.CharField(source="chat.title", read_only=True)
     topic_name = serializers.CharField(source="topic.name", read_only=True)

@@ -3,7 +3,7 @@ from random import choices
 
 from django.contrib.auth import authenticate
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Q, Sum
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import extend_schema
@@ -40,6 +40,7 @@ from .security import (
 )
 from .serializers import (
     AccessRequirementSerializer,
+    AdminJobSerializer,
     ArchivedMessageSerializer,
     ArchiveRuleSerializer,
     AuditEventSerializer,
@@ -401,6 +402,8 @@ def admin_stats(request):
             "chats": Chat.objects.count(),
             "archive_rules": ArchiveRule.objects.count(),
             "active_rules": ArchiveRule.objects.filter(enabled=True).count(),
+            "indexed_messages": ArchivedMessage.objects.count(),
+            "storage_bytes": FileRecord.objects.aggregate(total=Sum("file_size"))["total"] or 0,
             "jobs": dict(Job.objects.values_list("status").annotate(count=Count("id"))),
             "files": dict(FileRecord.objects.values_list("status").annotate(count=Count("id"))),
         }
@@ -411,15 +414,37 @@ def admin_stats(request):
 @api_view(["GET"])
 @permission_classes([IsAdminUser])
 def admin_users(request):
-    users = TelegramUser.objects.annotate(
-        chat_count=Count("chats"), rule_count=Count("archive_rules")
-    ).order_by("-created_at")[:500]
+    users = list(
+        TelegramUser.objects.select_related("connected_account").order_by("-created_at")[:500]
+    )
+    user_ids = [user.pk for user in users]
+
+    def owner_counts(model):
+        return dict(
+            model.objects.filter(owner_id__in=user_ids)
+            .values_list("owner_id")
+            .annotate(count=Count("id"))
+        )
+
+    chat_counts = owner_counts(Chat)
+    rule_counts = owner_counts(ArchiveRule)
+    job_counts = owner_counts(Job)
+    indexed_message_counts = owner_counts(ArchivedMessage)
+    file_counts = owner_counts(FileRecord)
     return Response(
         [
             {
                 **TelegramUserSerializer(user).data,
-                "chat_count": user.chat_count,
-                "rule_count": user.rule_count,
+                "chat_count": chat_counts.get(user.pk, 0),
+                "rule_count": rule_counts.get(user.pk, 0),
+                "job_count": job_counts.get(user.pk, 0),
+                "indexed_message_count": indexed_message_counts.get(user.pk, 0),
+                "file_count": file_counts.get(user.pk, 0),
+                "account_connected": getattr(user, "connected_account", None) is not None
+                and user.connected_account.is_connected,
+                "last_synced_at": getattr(
+                    getattr(user, "connected_account", None), "last_synced_at", None
+                ),
             }
             for user in users
         ]
@@ -431,7 +456,7 @@ def admin_users(request):
 @permission_classes([IsAdminUser])
 def admin_jobs(request):
     return Response(
-        JobSerializer(
+        AdminJobSerializer(
             Job.objects.select_related("owner").order_by("-created_at")[:500], many=True
         ).data
     )
@@ -465,6 +490,52 @@ def admin_user_detail(request, telegram_id: int):
 @object_schema
 @api_view(["POST"])
 @permission_classes([IsAdminUser])
+def admin_delete_user(request, telegram_id: int):
+    """Permanently remove a Telegram user and every locally stored account record."""
+    if str(request.data.get("confirmation", "")) != str(telegram_id):
+        return Response(
+            {"detail": "Type the Telegram user ID to confirm permanent deletion."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user = TelegramUser.objects.get(pk=telegram_id)
+    active_jobs = list(
+        user.jobs.filter(status__in=[Job.Status.QUEUED, Job.Status.RUNNING])
+    )
+    deleted = {
+        "connected_session": int(
+            ConnectedAccount.objects.filter(user=user).exclude(encrypted_session="").exists()
+        ),
+        "chats": user.chats.count(),
+        "archive_rules": user.archive_rules.count(),
+        "indexed_messages": user.indexed_messages.count(),
+        "files": user.files.count(),
+        "jobs": user.jobs.count(),
+    }
+
+    for job in active_jobs:
+        cancel_job(job)
+
+    with transaction.atomic():
+        AuditEvent.objects.filter(
+            Q(actor_telegram_id=telegram_id)
+            | Q(target_telegram_id=telegram_id)
+        ).delete()
+        user.delete()
+
+    return Response(
+        {
+            "deleted": True,
+            "telegram_id": telegram_id,
+            "cancelled_jobs": len(active_jobs),
+            "records": deleted,
+        }
+    )
+
+
+@object_schema
+@api_view(["POST"])
+@permission_classes([IsAdminUser])
 def admin_simulate_user(request, telegram_id: int):
     user = TelegramUser.objects.get(pk=telegram_id, is_active=True)
     AuditEvent.objects.create(
@@ -488,7 +559,7 @@ def admin_retry_job(request, job_id: int):
     job.finished_at = None
     job.save()
     transaction.on_commit(lambda: process_job.delay(job.pk))
-    return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+    return Response(AdminJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
 
 
 @object_schema
@@ -497,7 +568,7 @@ def admin_retry_job(request, job_id: int):
 def admin_cancel_job(request, job_id: int):
     job = Job.objects.get(pk=job_id)
     cancel_job(job)
-    return Response(JobSerializer(job).data)
+    return Response(AdminJobSerializer(job).data)
 
 
 @object_schema

@@ -258,9 +258,36 @@ async def _run() -> None:
             logger.error("Skipping expired Telegram session for user %s", account.user_id)
             await client.disconnect()
             continue
-        clients.append(client)
+        clients.append((account.pk, account.user_id, client))
         logger.info("Listening for Telegram user %s", account.user_id)
-    await asyncio.gather(*(client.run_until_disconnected() for client in clients))
+    await asyncio.gather(
+        *(client.run_until_disconnected() for _, _, client in clients),
+        *(
+            _disconnect_removed_account(account_id, user_id, client)
+            for account_id, user_id, client in clients
+        ),
+    )
+
+
+async def _disconnect_removed_account(account_id: int, user_id: int, client) -> None:
+    """Stop an in-memory Telegram client when its encrypted session is deleted."""
+    while client.is_connected():
+        await asyncio.sleep(5)
+        try:
+            still_connected = await sync_to_async(
+                ConnectedAccount.objects.filter(
+                    pk=account_id,
+                    user_id=user_id,
+                    is_connected=True,
+                ).exists
+            )()
+        except Exception:
+            logger.exception("Could not verify Telegram session %s", account_id)
+            continue
+        if not still_connected:
+            logger.info("Disconnecting deleted Telegram session for user %s", user_id)
+            await client.disconnect()
+            return
 
 
 class Command(BaseCommand):

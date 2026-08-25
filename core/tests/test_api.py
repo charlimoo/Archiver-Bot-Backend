@@ -7,8 +7,11 @@ from rest_framework.test import APIClient
 from core.models import (
     AccessRequirement,
     ArchivedMessage,
+    AuditEvent,
     AutomationRule,
     Chat,
+    ConnectedAccount,
+    FileRecord,
     GroupSettings,
     Job,
     TelegramUser,
@@ -265,3 +268,100 @@ def test_admin_can_cancel_a_queued_job(django_user_model):
     assert response.status_code == 200
     assert response.data["status"] == Job.Status.CANCELLED
     assert job.status == Job.Status.CANCELLED
+
+
+@pytest.mark.django_db
+@patch("core.tasks.current_app.control.revoke")
+def test_admin_can_permanently_delete_all_user_data(revoke, django_user_model):
+    admin = django_user_model.objects.create_user(username="privacy-admin", is_staff=True)
+    owner = TelegramUser.objects.create(telegram_id=707, first_name="Delete me")
+    ConnectedAccount.objects.create(
+        user=owner,
+        encrypted_session="encrypted-telegram-session",
+        is_connected=True,
+    )
+    chat = Chat.objects.create(
+        owner=owner,
+        telegram_id=-707,
+        type=Chat.Type.SUPERGROUP,
+        title="Private archive",
+    )
+    ArchivedMessage.objects.create(
+        owner=owner,
+        chat=chat,
+        telegram_message_id=1,
+        text="sensitive data",
+        content_type="text",
+    )
+    FileRecord.objects.create(
+        owner=owner,
+        file_unique_id="private-file",
+        file_size=2048,
+        file_name="private.pdf",
+    )
+    job = Job.objects.create(
+        owner=owner,
+        type=Job.Type.HISTORY_INDEX,
+        status=Job.Status.RUNNING,
+        celery_task_id="delete-user-task",
+    )
+    AuditEvent.objects.create(
+        actor_telegram_id=owner.pk,
+        chat_telegram_id=chat.telegram_id,
+        kind="private_event",
+    )
+    unrelated_audit = AuditEvent.objects.create(
+        target_telegram_id=999,
+        kind="unrelated_event",
+    )
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Admin {issue_admin_token(admin.pk)}")
+
+    rejected = client.post(
+        f"/api/admin/users/{owner.pk}/delete/",
+        {"confirmation": "wrong"},
+        format="json",
+    )
+    response = client.post(
+        f"/api/admin/users/{owner.pk}/delete/",
+        {"confirmation": str(owner.pk)},
+        format="json",
+    )
+
+    assert rejected.status_code == 400
+    assert response.status_code == 200
+    assert response.data["deleted"] is True
+    assert response.data["cancelled_jobs"] == 1
+    assert response.data["records"] == {
+        "connected_session": 1,
+        "chats": 1,
+        "archive_rules": 0,
+        "indexed_messages": 1,
+        "files": 1,
+        "jobs": 1,
+    }
+    assert not TelegramUser.objects.filter(pk=owner.pk).exists()
+    assert not ConnectedAccount.objects.filter(user_id=owner.pk).exists()
+    assert not Chat.objects.filter(owner_id=owner.pk).exists()
+    assert not ArchivedMessage.objects.filter(owner_id=owner.pk).exists()
+    assert not FileRecord.objects.filter(owner_id=owner.pk).exists()
+    assert not Job.objects.filter(pk=job.pk).exists()
+    assert not AuditEvent.objects.filter(kind="private_event").exists()
+    assert AuditEvent.objects.filter(pk=unrelated_audit.pk).exists()
+    revoke.assert_called_once_with("delete-user-task", terminate=True, signal="SIGTERM")
+
+
+@pytest.mark.django_db
+def test_admin_job_list_includes_owner_identity(django_user_model):
+    admin = django_user_model.objects.create_user(username="job-admin", is_staff=True)
+    owner = TelegramUser.objects.create(telegram_id=808, first_name="Job", last_name="Owner")
+    job = Job.objects.create(owner=owner, type=Job.Type.CHAT_SYNC)
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Admin {issue_admin_token(admin.pk)}")
+
+    response = client.get("/api/admin/jobs/")
+
+    assert response.status_code == 200
+    listed = next(item for item in response.data if item["id"] == job.pk)
+    assert listed["owner_telegram_id"] == owner.pk
+    assert listed["owner_display_name"] == "Job Owner"

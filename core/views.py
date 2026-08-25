@@ -55,7 +55,7 @@ from .serializers import (
     TopicSerializer,
 )
 from .services import register_file
-from .tasks import process_job
+from .tasks import cancel_job, process_job
 
 object_schema = extend_schema(
     request=OpenApiTypes.OBJECT,
@@ -228,9 +228,7 @@ class JobViewSet(OwnedViewSet):
         )
 
     def perform_destroy(self, instance):
-        instance.status = Job.Status.CANCELLED
-        instance.finished_at = timezone.now()
-        instance.save(update_fields=["status", "finished_at", "updated_at"])
+        cancel_job(instance)
 
     @action(detail=False, methods=["post"], url_path="sync-chats")
     def sync_chats(self, request):
@@ -491,6 +489,15 @@ def admin_retry_job(request, job_id: int):
     job.save()
     transaction.on_commit(lambda: process_job.delay(job.pk))
     return Response(JobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
+
+
+@object_schema
+@api_view(["POST"])
+@permission_classes([IsAdminUser])
+def admin_cancel_job(request, job_id: int):
+    job = Job.objects.get(pk=job_id)
+    cancel_job(job)
+    return Response(JobSerializer(job).data)
 
 
 @object_schema

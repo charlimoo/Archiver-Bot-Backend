@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 
 from asgiref.sync import sync_to_async
-from celery import shared_task
+from celery import current_app, shared_task
 from django.conf import settings
 from django.utils import timezone
 from telethon import TelegramClient
@@ -27,6 +27,23 @@ from .models import (
 )
 from .security import decrypt_session
 from .services import index_archived_message, register_file
+
+
+def cancel_job(job: Job) -> Job:
+    """Persist cancellation and terminate the active Celery child when necessary."""
+    if job.status not in {Job.Status.QUEUED, Job.Status.RUNNING}:
+        return job
+    was_running = job.status == Job.Status.RUNNING
+    job.status = Job.Status.CANCELLED
+    job.finished_at = timezone.now()
+    job.save(update_fields=["status", "finished_at", "updated_at"])
+    if job.celery_task_id:
+        current_app.control.revoke(
+            job.celery_task_id,
+            terminate=was_running,
+            signal="SIGTERM",
+        )
+    return job
 
 
 def _content_type(message) -> str:
@@ -341,6 +358,10 @@ async def _index_history(job: Job) -> None:
         limit_per_chat = int(job.payload.get("limit_per_chat", 0)) or None
         processed = 0
         for chat in chats:
+            if await sync_to_async(
+                Job.objects.filter(pk=job.pk, status=Job.Status.CANCELLED).exists
+            )():
+                return
             try:
                 entity = await resolve_input_entity(client, chat.telegram_id)
             except RuntimeError:

@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 from django.test import override_settings
 from rest_framework.test import APIClient
@@ -8,6 +10,7 @@ from core.models import (
     AutomationRule,
     Chat,
     GroupSettings,
+    Job,
     TelegramUser,
 )
 from core.security import issue_admin_token, issue_user_token
@@ -224,3 +227,41 @@ def test_admin_can_simulate_an_active_user(django_user_model):
 
     assert response.status_code == 200
     assert me.data["telegram_id"] == target.pk
+
+
+@pytest.mark.django_db
+@patch("core.tasks.current_app.control.revoke")
+def test_user_can_cancel_an_active_job(revoke):
+    owner = TelegramUser.objects.create(telegram_id=505)
+    job = Job.objects.create(
+        owner=owner,
+        type=Job.Type.HISTORY_INDEX,
+        status=Job.Status.RUNNING,
+        celery_task_id="active-task-id",
+    )
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {issue_user_token(owner.pk)}")
+
+    response = client.delete(f"/api/jobs/{job.pk}/")
+
+    job.refresh_from_db()
+    assert response.status_code == 204
+    assert job.status == Job.Status.CANCELLED
+    assert job.finished_at is not None
+    revoke.assert_called_once_with("active-task-id", terminate=True, signal="SIGTERM")
+
+
+@pytest.mark.django_db
+def test_admin_can_cancel_a_queued_job(django_user_model):
+    admin = django_user_model.objects.create_user(username="admin-cancel", is_staff=True)
+    owner = TelegramUser.objects.create(telegram_id=606)
+    job = Job.objects.create(owner=owner, type=Job.Type.HISTORY_IMPORT)
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Admin {issue_admin_token(admin.pk)}")
+
+    response = client.post(f"/api/admin/jobs/{job.pk}/cancel/")
+
+    job.refresh_from_db()
+    assert response.status_code == 200
+    assert response.data["status"] == Job.Status.CANCELLED
+    assert job.status == Job.Status.CANCELLED

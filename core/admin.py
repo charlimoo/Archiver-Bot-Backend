@@ -19,6 +19,7 @@ from .models import (
     TelegramUser,
     Topic,
 )
+from .tasks import cancel_job
 
 
 @admin.register(TelegramUser)
@@ -33,6 +34,16 @@ class JobAdmin(admin.ModelAdmin):
     list_display = ("id", "owner", "type", "status", "progress", "total", "created_at")
     list_filter = ("type", "status")
     readonly_fields = ("created_at", "updated_at", "started_at", "finished_at")
+    actions = ("cancel_selected_jobs",)
+
+    @admin.action(description="Cancel selected queued or running jobs")
+    def cancel_selected_jobs(self, request, queryset):
+        cancelled = 0
+        for job in queryset:
+            if job.status in {Job.Status.QUEUED, Job.Status.RUNNING}:
+                cancel_job(job)
+                cancelled += 1
+        self.message_user(request, f"Cancelled {cancelled} job(s).")
 
 
 @admin.register(AuditEvent)

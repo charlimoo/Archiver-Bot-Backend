@@ -58,6 +58,31 @@ def test_service_can_upsert_user():
 
 
 @pytest.mark.django_db
+@override_settings(SERVICE_AUTH_SECRET="service-secret")
+def test_service_can_read_user_setup_status():
+    user = TelegramUser.objects.create(telegram_id=11, first_name="Grace")
+    Chat.objects.create(owner=user, telegram_id=-11, type=Chat.Type.SUPERGROUP)
+    client = APIClient()
+
+    response = client.get(
+        "/api/service/users/status/?telegram_id=11",
+        HTTP_X_SERVICE_TOKEN="service-secret",
+    )
+
+    assert response.status_code == 200
+    assert response.data == {
+        "connected": False,
+        "last_synced_at": None,
+        "archive_ready": False,
+        "chats": 1,
+        "rules": 0,
+        "active_rules": 0,
+        "jobs": 0,
+        "failed_jobs": 0,
+    }
+
+
+@pytest.mark.django_db
 def test_staff_can_use_admin_dashboard_api(django_user_model):
     django_user_model.objects.create_user(
         username="operator",

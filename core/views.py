@@ -504,6 +504,38 @@ def service_upsert_user(request):
 @api_view(["GET"])
 @authentication_classes([])
 @permission_classes([AllowAny])
+def service_user_status(request):
+    require_service_token(request)
+    telegram_id = request.query_params.get("telegram_id", "")
+    if not telegram_id.lstrip("-").isdigit():
+        return Response(
+            {"detail": "A valid telegram_id is required."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        user = TelegramUser.objects.get(pk=int(telegram_id))
+    except TelegramUser.DoesNotExist:
+        return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
+    account = ConnectedAccount.objects.filter(user=user).first()
+    jobs = user.jobs.all()
+    return Response(
+        {
+            "connected": bool(account and account.is_connected),
+            "last_synced_at": account.last_synced_at if account else None,
+            "archive_ready": bool(user.archive_chat_id),
+            "chats": user.chats.count(),
+            "rules": user.archive_rules.count(),
+            "active_rules": user.archive_rules.filter(enabled=True).count(),
+            "jobs": jobs.count(),
+            "failed_jobs": jobs.filter(status=Job.Status.FAILED).count(),
+        }
+    )
+
+
+@object_schema
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
 def service_access_requirements(request):
     require_service_token(request)
     requirements = list(AccessRequirement.objects.filter(active=True))

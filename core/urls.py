@@ -34,6 +34,7 @@ urlpatterns = [
     path("admin/users/<int:telegram_id>/simulate/", views.admin_simulate_user),
     path("admin/jobs/<int:job_id>/retry/", views.admin_retry_job),
     path("service/users/upsert/", views.service_upsert_user),
+    path("service/users/status/", views.service_user_status),
     path("service/access-requirements/", views.service_access_requirements),
     path("service/access-requirements/complete/", views.service_complete_requirement),
     path("service/admin-archive-topic/", views.service_admin_archive_topic),
